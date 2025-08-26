@@ -2,7 +2,8 @@
  * @file    ringBuffer.c
  * @author  Kshitij Mistry
  * @brief
- *
+ * @todo Add support for self allocated buffer memory, user will provide the memory pointer
+ *       and size while creating the buffer instance.
  *****************************************************************************/
 
 /*****************************************************************************
@@ -35,11 +36,15 @@ Rb_Info_t gRbInfo[MAX_BUFFER_HANDLE] = {0}; /**< Ring buffer information for eac
 /*****************************************************************************
  * FUNCTION DECLARATIONS
  *****************************************************************************/
+static cBool handleFragmentedRead(Rb_Info_t *rbInfo, cU8_t **readPtr, cU64_t *dataBytes);
+
+static cBool isFreeDataIndexAvailable(cI32_t bufferHandle);
+
 static cU64_t getContiguousFreeSpace(cI32_t bufferHandle);
 
 static cU64_t getFreeSpace(cI32_t bufferHandle);
 
-__attribute__((unused)) static cU64_t getOccupiedSpace(cI32_t bufferHandle);
+static cU64_t getOccupiedSpace(cI32_t bufferHandle);
 
 /*****************************************************************************
  * FUNCTION DEFINATIONS
@@ -62,6 +67,8 @@ void Rb_InitModule(void)
         gRbInfo[handleId].writeIndex = 0;
         gRbInfo[handleId].bufferHandle = INVALID_BUFFER_HANDLE;
         gRbInfo[handleId].fragmentedDataF = c_FALSE;
+        gRbInfo[handleId].fragmentedDataPtr = NULL;
+        gRbInfo[handleId].readCommittedF = c_TRUE;
     }
 }
 
@@ -77,6 +84,11 @@ void Rb_DeinitModule(void)
         if (gRbInfo[handleId].pBufferBegin != NULL)
         {
             FREE_MEMORY(gRbInfo[handleId].pBufferBegin);
+        }
+
+        if (gRbInfo[handleId].fragmentedDataPtr != NULL)
+        {
+            FREE_MEMORY(gRbInfo[handleId].fragmentedDataPtr);
         }
     }
 }
@@ -117,6 +129,8 @@ cBool Rb_CreateBuffer(cU64_t bufferSizeInBytes, cI32_t *bufferHandle)
             gRbInfo[handleId].writeIndex = 0;
             gRbInfo[handleId].bufferHandle = handleId;
             gRbInfo[handleId].fragmentedDataF = c_FALSE;
+            gRbInfo[handleId].fragmentedDataPtr = NULL;
+            gRbInfo[handleId].readCommittedF = c_TRUE;
 
             *bufferHandle = handleId;
             return c_TRUE;
@@ -125,6 +139,26 @@ cBool Rb_CreateBuffer(cU64_t bufferSizeInBytes, cI32_t *bufferHandle)
 
     EPRINT("maximum buffer handles reached: [maxHandles=%d]", MAX_BUFFER_HANDLE);
     return c_FALSE;  // No available buffer handle
+}
+
+//----------------------------------------------------------------------------
+/**
+ * @brief Get the count of unread indices in the buffer.
+ * @param bufferHandle Handle of the buffer.
+ * @return cU64_t Returns the count of unread indices in the buffer.
+ */
+cU64_t Rb_GetUnreadIndexCount(cI32_t bufferHandle)
+{
+    Rb_Info_t *rbInfo = &gRbInfo[bufferHandle];
+
+    if (rbInfo->readIndex > rbInfo->writeIndex)
+    {
+        return (MAX_DATA_INDEX - (rbInfo->readIndex - rbInfo->writeIndex));
+    }
+    else
+    {
+        return (rbInfo->writeIndex - rbInfo->readIndex);
+    }
 }
 
 //----------------------------------------------------------------------------
@@ -154,7 +188,7 @@ cBool Rb_WriteToBuffer(cI32_t bufferHandle, const cU8_t *data, cU64_t dataBytes)
     cU64_t       contiguousFreeSpace = getContiguousFreeSpace(bufferHandle);
     const cU8_t *tDataPtr = data;
 
-    if ((rbInfo->readIndex > rbInfo->writeIndex) && (rbInfo->writeIndex + 1) == rbInfo->readIndex)
+    if (isFreeDataIndexAvailable(bufferHandle) == c_FALSE)
     {
         EPRINT("max data index reached");
         return c_FALSE;
@@ -183,8 +217,8 @@ cBool Rb_WriteToBuffer(cI32_t bufferHandle, const cU8_t *data, cU64_t dataBytes)
 
     memcpy(rbInfo->pWriter, tDataPtr, dataBytes);
     rbInfo->dataLen[rbInfo->writeIndex] = dataBytes;
-    rbInfo->pWriter += dataBytes;
     rbInfo->writeIndex++;
+    rbInfo->pWriter += dataBytes;
 
     return c_TRUE;
 }
@@ -197,7 +231,7 @@ cBool Rb_WriteToBuffer(cI32_t bufferHandle, const cU8_t *data, cU64_t dataBytes)
  * @param dataBytes Pointer to store the size of the read data in bytes.
  * @return cBool Returns c_TRUE if the data is read successfully, otherwise c_FALSE.
  */
-cBool Rb_ReadFromBuffer(cI32_t bufferHandle, cU8_t *data, cU64_t *dataBytes)
+cBool Rb_PeekRead(cI32_t bufferHandle, cU8_t **readPtr, cU64_t *dataBytes)
 {
     if (IS_VALID_BUFFER_HANDLE(bufferHandle) == c_FALSE)
     {
@@ -205,13 +239,21 @@ cBool Rb_ReadFromBuffer(cI32_t bufferHandle, cU8_t *data, cU64_t *dataBytes)
         return c_FALSE;
     }
 
-    if ((dataBytes == NULL) || (*dataBytes == 0) || (data == NULL))
+    if ((dataBytes == NULL) || (*dataBytes == 0) || (readPtr == NULL))
     {
         EPRINT("invalid data or data size: [dataBytes=%lu]", *dataBytes);
         return c_FALSE;
     }
 
     Rb_Info_t *rbInfo = &gRbInfo[bufferHandle];
+
+    if (rbInfo->readCommittedF == c_FALSE)
+    {
+        EPRINT("previous read not committed");
+        return c_FALSE;
+    }
+
+    rbInfo->readCommittedF = c_FALSE;
 
     if (rbInfo->dataLen[rbInfo->readIndex] == 0)
     {
@@ -223,172 +265,11 @@ cBool Rb_ReadFromBuffer(cI32_t bufferHandle, cU8_t *data, cU64_t *dataBytes)
     // Check if reading fragmented data
     if (((rbInfo->pReader + rbInfo->dataLen[rbInfo->readIndex]) == (rbInfo->pBufferBegin + rbInfo->size)) && (rbInfo->fragmentedDataF == c_TRUE))
     {
-        memcpy(data, rbInfo->pReader, rbInfo->dataLen[rbInfo->readIndex]);
-        *dataBytes = rbInfo->dataLen[rbInfo->readIndex];
-        rbInfo->dataLen[rbInfo->readIndex] = 0;
-        rbInfo->readIndex++;
-
-        if (rbInfo->dataLen[rbInfo->readIndex] == 0)
-        {
-            EPRINT("fragmented data not found");
-            rbInfo->fragmentedDataF = c_FALSE;
-            *dataBytes = 0;
-            return c_FALSE;
-        }
-
-        // Wrap around
-        rbInfo->pReader = rbInfo->pBufferBegin;
-
-        memcpy((data + *dataBytes), rbInfo->pReader, rbInfo->dataLen[rbInfo->readIndex]);
-        *dataBytes += rbInfo->dataLen[rbInfo->readIndex];
-        rbInfo->dataLen[rbInfo->readIndex] = 0;
-        rbInfo->readIndex++;
-        rbInfo->pReader += rbInfo->dataLen[rbInfo->readIndex];
-
-        // Reset the fragmentation flag
-        rbInfo->fragmentedDataF = c_FALSE;
+       return handleFragmentedRead(rbInfo, readPtr, dataBytes);
     }
-    else
-    {
-        memcpy(data, rbInfo->pReader, rbInfo->dataLen[rbInfo->readIndex]);
-        *dataBytes = rbInfo->dataLen[rbInfo->readIndex];
-        rbInfo->dataLen[rbInfo->readIndex] = 0;
-        rbInfo->pReader += *dataBytes;
-    }
-
-    return c_TRUE;
-}
-
-//----------------------------------------------------------------------------
-/**
- * @brief Get a pointer to the write position in the buffer and the available size for writing.
- * @param bufferHandle Handle of the buffer.
- * @param writePtr Pointer to store the write pointer.
- * @param contiguousFreeSpace Pointer to store contiguous available size for writing.
- * @param totalFreeSpace Pointer to store the total available size for writing.
- * @return cBool Returns c_TRUE if the write pointer is obtained successfully, otherwise c_FALSE
- */
-cBool Rb_PeekWrite(cI32_t bufferHandle, cU8_t **writePtr, cU64_t *contiguousFreeSpace, cU64_t *totalFreeSpace)
-{
-    if (IS_VALID_BUFFER_HANDLE(bufferHandle) == c_FALSE)
-    {
-        EPRINT("invalid buffer handle: [bufferHandle=%d]", bufferHandle);
-        return c_FALSE;
-    }
-
-    if ((writePtr == NULL) || (contiguousFreeSpace == NULL) || (totalFreeSpace == NULL))
-    {
-        EPRINT("invalid write pointer or available size pointer");
-        return c_FALSE;
-    }
-
-    Rb_Info_t *rbInfo = &gRbInfo[bufferHandle];
-
-    if ((rbInfo->readIndex > rbInfo->writeIndex) && (rbInfo->writeIndex + 1) == rbInfo->readIndex)
-    {
-        EPRINT("max data index reached");
-        *contiguousFreeSpace = 0;
-        *totalFreeSpace = 0;
-
-        return c_TRUE;
-    }
-
-    *writePtr = rbInfo->pWriter;
-    *contiguousFreeSpace = getContiguousFreeSpace(bufferHandle);
-    *totalFreeSpace = getFreeSpace(bufferHandle);
-
-    return c_TRUE;
-}
-
-//----------------------------------------------------------------------------
-/**
- * @brief Commit the write operation to the buffer.
- * @param bufferHandle Handle of the buffer.
- * @param dataBytes Size of the data written in bytes.
- * @param fragmentedDataF Pointer to store the fragmentation flag.
- * @return cBool Returns c_TRUE if the write is committed successfully, otherwise c_FALSE
- */
-cBool Rb_CommitWrite(cI32_t bufferHandle, cU64_t dataBytes, cBool *fragmentedDataF)
-{
-    if (IS_VALID_BUFFER_HANDLE(bufferHandle) == c_FALSE)
-    {
-        EPRINT("invalid buffer handle: [bufferHandle=%d]", bufferHandle);
-        return c_FALSE;
-    }
-
-    Rb_Info_t *rbInfo = &gRbInfo[bufferHandle];
-
-    if (dataBytes == 0)
-    {
-        EPRINT("invalid data size: [dataBytes=%lu]", dataBytes);
-        return c_FALSE;
-    }
-
-    if (dataBytes > getContiguousFreeSpace(bufferHandle))
-    {
-        EPRINT("written data exceeds contiguous free space: [dataBytes=%lu], [contiguousFreeSpace=%lu]", dataBytes,
-               getContiguousFreeSpace(bufferHandle));
-        return c_FALSE;
-    }
-
-    rbInfo->pWriter += dataBytes;
-    rbInfo->dataLen[rbInfo->writeIndex] = dataBytes;
-
-    if (rbInfo->writeIndex == (MAX_DATA_INDEX - 1))
-    {
-        rbInfo->writeIndex = 0;  // Wrap around
-    }
-    else
-    {
-        rbInfo->writeIndex++;
-    }
-
-    if (fragmentedDataF != NULL)
-    {
-        rbInfo->fragmentedDataF = *fragmentedDataF;
-    }
-
-    return c_TRUE;
-}
-
-//----------------------------------------------------------------------------
-/**
- * @brief Get a pointer to the read position in the buffer and the available size for reading.
- * @param bufferHandle Handle of the buffer.
- * @param readPtr Pointer to store the read pointer.
- * @param dataBytes Pointer to store the available size for reading.
- * @param fragmentedDataF Pointer to store the fragmentation flag.
- * @return cBool Returns c_TRUE if the read pointer is obtained successfully, otherwise c_FALSE
- */
-cBool Rb_PeekRead(cI32_t bufferHandle, cU8_t **readPtr, cU64_t *dataBytes, cBool *fragmentedDataF)
-{
-    if (IS_VALID_BUFFER_HANDLE(bufferHandle) == c_FALSE)
-    {
-        EPRINT("invalid buffer handle: [bufferHandle=%d]", bufferHandle);
-        return c_FALSE;
-    }
-
-    if ((readPtr == NULL) || (dataBytes == NULL))
-    {
-        EPRINT("invalid read pointer or available size pointer");
-        return c_FALSE;
-    }
-
-    Rb_Info_t *rbInfo = &gRbInfo[bufferHandle];
 
     *readPtr = rbInfo->pReader;
     *dataBytes = rbInfo->dataLen[rbInfo->readIndex];
-
-    // Set fragmentation flag only if this is the last chunk of data in the buffer
-    if ((rbInfo->pReader + rbInfo->dataLen[rbInfo->readIndex]) == (rbInfo->pBufferBegin + rbInfo->size))
-    {
-        *fragmentedDataF = rbInfo->fragmentedDataF;
-    }
-    else
-    {
-        *fragmentedDataF = c_FALSE;
-    }
-
     return c_TRUE;
 }
 
@@ -411,10 +292,31 @@ cBool Rb_CommitRead(cI32_t bufferHandle, cU64_t dataBytes)
 
     Rb_Info_t *rbInfo = &gRbInfo[bufferHandle];
 
+    if (rbInfo->readCommittedF == c_TRUE)
+    {
+        EPRINT("no peek read has been performed");
+        return c_FALSE;
+    }
+
+    rbInfo->readCommittedF = c_TRUE;
+
     if (dataBytes == 0)
     {
         EPRINT("invalid data size: [dataBytes=%lu]", dataBytes);
         return c_FALSE;
+    }
+
+    /* Note: If the data was fragmented during write, we allocated memory to hold the fragmented data
+     *       during peek read, so we will just free that memory during commit read and return as all
+     *       pointers & indices are already updated in peek read.
+     */
+    if (rbInfo->fragmentedDataPtr != NULL)
+    {
+        FREE_MEMORY(rbInfo->fragmentedDataPtr);
+
+        rbInfo->fragmentedDataF = c_FALSE;
+
+        return c_TRUE;
     }
 
     if (dataBytes != rbInfo->dataLen[rbInfo->readIndex])
@@ -429,7 +331,7 @@ cBool Rb_CommitRead(cI32_t bufferHandle, cU64_t dataBytes)
 
     if (rbInfo->readIndex == (MAX_DATA_INDEX - 1))
     {
-        rbInfo->readIndex = 0;  // Wrap around
+        rbInfo->readIndex = 0;
     }
     else
     {
@@ -437,6 +339,89 @@ cBool Rb_CommitRead(cI32_t bufferHandle, cU64_t dataBytes)
     }
 
     return c_TRUE;
+}
+
+//----------------------------------------------------------------------------
+/**
+ * @brief Handle reading fragmented data from the buffer.
+ * @param rbInfo Pointer to the ring buffer information.
+ * @param readPtr Pointer to store the read pointer.
+ * @param dataBytes Pointer to store the size of the read data in bytes.
+ * @return cBool Returns c_TRUE if the fragmented data is handled successfully, otherwise c_FALSE.
+ */
+static cBool handleFragmentedRead(Rb_Info_t *rbInfo, cU8_t **readPtr, cU64_t *dataBytes)
+{
+    cU64_t part1Bytes, part2Bytes;
+
+    if (rbInfo->readIndex >= MAX_DATA_INDEX)
+    {
+        // Wrap around
+        rbInfo->readIndex = 0;
+
+        part1Bytes = rbInfo->dataLen[rbInfo->readIndex];
+        rbInfo->dataLen[rbInfo->readIndex] = 0;
+        rbInfo->readIndex++;
+
+        part2Bytes = rbInfo->dataLen[rbInfo->readIndex];
+        rbInfo->dataLen[rbInfo->readIndex] = 0;
+        rbInfo->readIndex++;
+    }
+    else if ((rbInfo->readIndex + 1) >= MAX_DATA_INDEX)
+    {
+        part1Bytes = rbInfo->dataLen[rbInfo->readIndex];
+        rbInfo->dataLen[rbInfo->readIndex] = 0;
+
+        // Wrap around
+        rbInfo->readIndex = 0;
+
+        part2Bytes = rbInfo->dataLen[rbInfo->readIndex];
+        rbInfo->dataLen[rbInfo->readIndex] = 0;
+        rbInfo->readIndex++;
+    }
+    else
+    {
+        // Normal case
+        part1Bytes = rbInfo->dataLen[rbInfo->readIndex];
+        rbInfo->dataLen[rbInfo->readIndex] = 0;
+        rbInfo->readIndex++;
+
+        part2Bytes = rbInfo->dataLen[rbInfo->readIndex];
+        rbInfo->dataLen[rbInfo->readIndex] = 0;
+        rbInfo->readIndex++;
+    }
+
+    // Allocate memory to hold the fragmented data
+    rbInfo->fragmentedDataPtr = (cU8_t *)malloc(part1Bytes + part2Bytes);
+
+    if (rbInfo->fragmentedDataPtr == NULL)
+    {
+        EPRINT("failed to allocate memory for reading fragmented data");
+        return c_FALSE;
+    }
+
+    // Copy fragmented data into the allocated memory
+    memcpy(rbInfo->fragmentedDataPtr, rbInfo->pReader, part1Bytes);
+    rbInfo->pReader = rbInfo->pBufferBegin;
+    memcpy((rbInfo->fragmentedDataPtr + part1Bytes), rbInfo->pReader, part2Bytes);
+    rbInfo->pReader += part2Bytes;
+
+    *readPtr = rbInfo->fragmentedDataPtr;
+    *dataBytes = (part1Bytes + part2Bytes);
+
+    return c_TRUE;
+}
+
+//------------------------------------------------------------------------------
+/**
+ * @brief Check if there is a free data index available in the buffer.
+ * @param bufferHandle Handle of the buffer.
+ * @return cBool Returns c_TRUE if a free data index is available, otherwise c_FALSE
+ */
+static cBool isFreeDataIndexAvailable(cI32_t bufferHandle)
+{
+    Rb_Info_t *rbInfo = &gRbInfo[bufferHandle];
+
+    return ((getOccupiedSpace(bufferHandle) > 0) && (rbInfo->readIndex == rbInfo->writeIndex));
 }
 
 //----------------------------------------------------------------------------
@@ -487,6 +472,7 @@ static cU64_t getOccupiedSpace(cI32_t bufferHandle)
 
     return (rbInfo->size - getFreeSpace(bufferHandle));
 }
+
 
 /*****************************************************************************
  * @END OF FILE
