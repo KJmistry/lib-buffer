@@ -18,11 +18,6 @@
  *****************************************************************************/
 typedef struct
 {
-    cU64_t bytes; /**< Size of the data in bytes */
-} Rb_Data_Info_t;
-
-typedef struct
-{
     cU8_t *pBufferBegin;            /**< Pointer to the buffer memory */
     cU8_t *pWriter;                 /**< Pointer to the writer position in the buffer */
     cU8_t *pReader;                 /**< Pointer to the reader position in the buffer */
