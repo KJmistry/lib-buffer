@@ -12,26 +12,6 @@
  *****************************************************************************/
 #include "common_stddef.h"
 
-#define MAX_DATA_INDEX (1000LL) /**< Maximum number of data indices in the ring buffer */
-/*****************************************************************************
- * STRUCTURES
- *****************************************************************************/
-typedef struct
-{
-    cU8_t *pBufferBegin;            /**< Pointer to the buffer memory */
-    cU8_t *pWriter;                 /**< Pointer to the writer position in the buffer */
-    cU8_t *pReader;                 /**< Pointer to the reader position in the buffer */
-    cU64_t size;                    /**< Size of the buffer in bytes */
-    cU64_t readIndex;               /**< Index for reading from the buffer */
-    cU64_t writeIndex;              /**< Index for writing to the buffer */
-    cU64_t dataLen[MAX_DATA_INDEX]; /**< Length of data at each index */
-    cI32_t bufferHandle;            /**< Handle for the buffer */
-    cBool  fragmentedDataF;         /**< Flag to indicate if the data is fragmented */
-    cU8_t *fragmentedDataPtr;       /**< Pointer to hold fragmented data */
-    cBool  readCommittedF;          /**< Flag to indicate if the read has been committed */
-
-} Rb_Info_t;
-
 /*****************************************************************************
  * FUNCTION DECLARATIONS
  *****************************************************************************/

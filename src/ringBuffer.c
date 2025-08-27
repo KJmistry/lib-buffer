@@ -17,16 +17,49 @@
 /*****************************************************************************
  * MACROS
  *****************************************************************************/
-#define _BYTES_PER_MEGA_BYTE             (1000000LL)
+#define _BYTES_PER_MEGA_BYTE             (1024LL*1024LL)
 
+/** Maximum allowed buffer size in bytes */
 #define MAX_ALLOWED_BUFFER_SIZE_IN_BYTES (10 * _BYTES_PER_MEGA_BYTE)  // 10 Mega Bytes (TODO : We can make this configurable)
 
+/** Invalid buffer handle */
 #define INVALID_BUFFER_HANDLE            (-1)  // Invalid buffer handle
 
+/** Maximum number of buffer handles supported */
 #define MAX_BUFFER_HANDLE                (10)  // (TODO : We can make this configurable)
 
+/** Check if buffer handle is valid */
 #define IS_VALID_BUFFER_HANDLE(handle) \
     (((handle) >= 0) && ((handle) < MAX_BUFFER_HANDLE) && (gRbInfo[(handle)].bufferHandle != INVALID_BUFFER_HANDLE))
+
+/** Check if reading fragmented data */
+#define IS_DATA_FRAGMENTED(rbInfo) \
+        (((rbInfo->pReader + rbInfo->dataLen[rbInfo->readIndex]) == (rbInfo->pBufferBegin + rbInfo->size)) && ((rbInfo)->fragmentedDataF == c_TRUE))
+
+/** Macro to check if buffer is empty (all data has been read) */
+#define IS_BUFFER_EMPTY(bufferHandle) (getFreeSpace(bufferHandle) == gRbInfo[(bufferHandle)].size)
+
+/** Maximum number of data indices in the ring buffer */
+#define MAX_DATA_INDEX (1000LL)
+
+/*****************************************************************************
+ * STRUCTURES
+ *****************************************************************************/
+typedef struct
+{
+    cU8_t *pBufferBegin;            /**< Pointer to the buffer memory */
+    cU8_t *pWriter;                 /**< Pointer to the writer position in the buffer */
+    cU8_t *pReader;                 /**< Pointer to the reader position in the buffer */
+    cU64_t size;                    /**< Size of the buffer in bytes */
+    cU64_t readIndex;               /**< Index for reading from the buffer */
+    cU64_t writeIndex;              /**< Index for writing to the buffer */
+    cU64_t dataLen[MAX_DATA_INDEX]; /**< Length of data at each index */
+    cI32_t bufferHandle;            /**< Handle for the buffer */
+    cBool  fragmentedDataF;         /**< Flag to indicate if the data is fragmented */
+    cU8_t *fragmentedDataPtr;       /**< Pointer to hold fragmented data */
+    cBool  readCommittedF;          /**< Flag to indicate if the read has been committed */
+
+} Rb_Info_t;
 
 /*****************************************************************************
  * VARIABLES
@@ -36,7 +69,13 @@ Rb_Info_t gRbInfo[MAX_BUFFER_HANDLE] = {0}; /**< Ring buffer information for eac
 /*****************************************************************************
  * FUNCTION DECLARATIONS
  *****************************************************************************/
-static cBool handleFragmentedRead(Rb_Info_t *rbInfo, cU8_t **readPtr, cU64_t *dataBytes);
+static cBool handleFragmentedPeek(Rb_Info_t *rbInfo, cU8_t **readPtr, cU64_t *dataBytes);
+
+static void handleFragmentedCommit(Rb_Info_t *rbInfo);
+
+static void advanceReader(Rb_Info_t *rbInfo, cU64_t dataBytes);
+
+static void resetBuffer(Rb_Info_t *rbInfo);
 
 static cU64_t getUnreadIndexCount(cI32_t bufferHandle);
 
@@ -294,9 +333,9 @@ cBool Rb_PeekRead(cI32_t bufferHandle, cU8_t **readPtr, cU64_t *dataBytes)
         return c_FALSE;
     }
 
-    if ((dataBytes == NULL) || (*dataBytes == 0) || (readPtr == NULL))
+    if ((dataBytes == NULL) || (readPtr == NULL))
     {
-        EPRINT("invalid data or data size: [dataBytes=%lu]", *dataBytes);
+        EPRINT("invalid data pointer");
         return c_FALSE;
     }
 
@@ -318,9 +357,9 @@ cBool Rb_PeekRead(cI32_t bufferHandle, cU8_t **readPtr, cU64_t *dataBytes)
     }
 
     // Check if reading fragmented data
-    if (((rbInfo->pReader + rbInfo->dataLen[rbInfo->readIndex]) == (rbInfo->pBufferBegin + rbInfo->size)) && (rbInfo->fragmentedDataF == c_TRUE))
+    if (IS_DATA_FRAGMENTED(rbInfo))
     {
-       return handleFragmentedRead(rbInfo, readPtr, dataBytes);
+       return handleFragmentedPeek(rbInfo, readPtr, dataBytes);
     }
 
     *readPtr = rbInfo->pReader;
@@ -367,48 +406,24 @@ cBool Rb_CommitRead(cI32_t bufferHandle, cU64_t dataBytes)
      */
     if (rbInfo->fragmentedDataPtr != NULL)
     {
-        FREE_MEMORY(rbInfo->fragmentedDataPtr);
-
-        rbInfo->fragmentedDataF = c_FALSE;
-
-        if (getFreeSpace(bufferHandle) == rbInfo->size)
-        {
-            // All data has been read, reset indices and pointers
-            rbInfo->readIndex = 0;
-            rbInfo->writeIndex = 0;
-            rbInfo->pReader = rbInfo->pBufferBegin;
-            rbInfo->pWriter = rbInfo->pBufferBegin;
-        }
-
-        return c_TRUE;
-    }
-
-    if (dataBytes != rbInfo->dataLen[rbInfo->readIndex])
-    {
-        EPRINT("data size to commit does not match the peeked data size: [dataBytes=%lu], [peekedDataSize=%lu]", dataBytes,
-               rbInfo->dataLen[rbInfo->readIndex]);
-        return c_FALSE;
-    }
-
-    rbInfo->dataLen[rbInfo->readIndex] = 0;
-    rbInfo->pReader += dataBytes;
-
-    if (rbInfo->readIndex == (MAX_DATA_INDEX - 1))
-    {
-        rbInfo->readIndex = 0;
+        handleFragmentedCommit(rbInfo);
     }
     else
     {
-        rbInfo->readIndex++;
+        if (dataBytes != rbInfo->dataLen[rbInfo->readIndex])
+        {
+            EPRINT("data size to commit does not match the peeked data size: [dataBytes=%lu], [peekedDataSize=%lu]", dataBytes,
+                   rbInfo->dataLen[rbInfo->readIndex]);
+            return c_FALSE;
+        }
+
+        advanceReader(rbInfo, dataBytes);
     }
 
-    if (getFreeSpace(bufferHandle) == rbInfo->size)
+    if (IS_BUFFER_EMPTY(bufferHandle))
     {
         // All data has been read, reset indices and pointers
-        rbInfo->readIndex = 0;
-        rbInfo->writeIndex = 0;
-        rbInfo->pReader = rbInfo->pBufferBegin;
-        rbInfo->pWriter = rbInfo->pBufferBegin;
+        resetBuffer(rbInfo);
     }
 
     return c_TRUE;
@@ -422,7 +437,7 @@ cBool Rb_CommitRead(cI32_t bufferHandle, cU64_t dataBytes)
  * @param dataBytes Pointer to store the size of the read data in bytes.
  * @return cBool Returns c_TRUE if the fragmented data is handled successfully, otherwise c_FALSE.
  */
-static cBool handleFragmentedRead(Rb_Info_t *rbInfo, cU8_t **readPtr, cU64_t *dataBytes)
+static cBool handleFragmentedPeek(Rb_Info_t *rbInfo, cU8_t **readPtr, cU64_t *dataBytes)
 {
     cU64_t part1Bytes, part2Bytes;
 
@@ -482,6 +497,51 @@ static cBool handleFragmentedRead(Rb_Info_t *rbInfo, cU8_t **readPtr, cU64_t *da
     *dataBytes = (part1Bytes + part2Bytes);
 
     return c_TRUE;
+}
+
+//----------------------------------------------------------------------------
+/**
+ * @brief Handle committing a read of fragmented data.
+ * @param rbInfo Pointer to the ring buffer information.
+ */
+static void handleFragmentedCommit(Rb_Info_t *rbInfo)
+{
+    FREE_MEMORY(rbInfo->fragmentedDataPtr);
+    rbInfo->fragmentedDataF = c_FALSE;
+}
+
+//----------------------------------------------------------------------------
+/**
+ * @brief Advance the reader pointer and index after committing a read.
+ * @param rbInfo Pointer to the ring buffer information.
+ * @param dataBytes Size of the data read in bytes.
+ */
+static void advanceReader(Rb_Info_t *rbInfo, cU64_t dataBytes)
+{
+    rbInfo->dataLen[rbInfo->readIndex] = 0;
+    rbInfo->pReader += dataBytes;
+
+    if (rbInfo->readIndex == (MAX_DATA_INDEX - 1))
+    {
+        rbInfo->readIndex = 0;
+    }
+    else
+    {
+        rbInfo->readIndex++;
+    }
+}
+
+//----------------------------------------------------------------------------
+/**
+ * @brief Reset the buffer pointers and indices.
+ * @param rbInfo Pointer to the ring buffer information.
+ */
+static void resetBuffer(Rb_Info_t *rbInfo)
+{
+    rbInfo->pReader = rbInfo->pBufferBegin;
+    rbInfo->pWriter = rbInfo->pBufferBegin;
+    rbInfo->readIndex = 0;
+    rbInfo->writeIndex = 0;
 }
 
 //------------------------------------------------------------------------------
