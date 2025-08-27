@@ -38,13 +38,13 @@ Rb_Info_t gRbInfo[MAX_BUFFER_HANDLE] = {0}; /**< Ring buffer information for eac
  *****************************************************************************/
 static cBool handleFragmentedRead(Rb_Info_t *rbInfo, cU8_t **readPtr, cU64_t *dataBytes);
 
-static cBool isFreeDataIndexAvailable(cI32_t bufferHandle);
+static cU64_t getUnreadIndexCount(cI32_t bufferHandle);
 
 static cU64_t getContiguousFreeSpace(cI32_t bufferHandle);
 
 static cU64_t getFreeSpace(cI32_t bufferHandle);
 
-static cU64_t getOccupiedSpace(cI32_t bufferHandle);
+static cU64_t getOccupiedSpace(cI32_t bufferHandle) __attribute__((unused));
 
 /*****************************************************************************
  * FUNCTION DEFINATIONS
@@ -143,22 +143,77 @@ cBool Rb_CreateBuffer(cU64_t bufferSizeInBytes, cI32_t *bufferHandle)
 
 //----------------------------------------------------------------------------
 /**
+ * @brief Destroy the buffer instance associated with the given handle.
+ * @param bufferHandle Handle of the buffer to be destroyed.
+ * @return cBool Returns c_TRUE if the buffer is destroyed successfully, otherwise c_FALSE
+ */
+cBool Rb_DestroyBuffer(cI32_t *bufferHandle)
+{
+    if (bufferHandle == NULL)
+    {
+        EPRINT("invalid buffer handle pointer");
+        return c_FALSE;
+    }
+
+    if (IS_VALID_BUFFER_HANDLE(*bufferHandle) == c_FALSE)
+    {
+        EPRINT("invalid buffer handle: [bufferHandle=%d]", (*bufferHandle));
+        return c_FALSE;
+    }
+
+    Rb_Info_t *rbInfo = &gRbInfo[(*bufferHandle)];
+
+    if (rbInfo->pBufferBegin != NULL)
+    {
+        FREE_MEMORY(rbInfo->pBufferBegin);
+        rbInfo->pBufferBegin = NULL;
+    }
+
+    if (rbInfo->fragmentedDataPtr != NULL)
+    {
+        FREE_MEMORY(rbInfo->fragmentedDataPtr);
+        rbInfo->fragmentedDataPtr = NULL;
+    }
+
+    *bufferHandle = INVALID_BUFFER_HANDLE;
+
+    return c_TRUE;
+}
+
+//----------------------------------------------------------------------------
+/**
  * @brief Get the count of unread indices in the buffer.
  * @param bufferHandle Handle of the buffer.
  * @return cU64_t Returns the count of unread indices in the buffer.
  */
 cU64_t Rb_GetUnreadIndexCount(cI32_t bufferHandle)
 {
-    Rb_Info_t *rbInfo = &gRbInfo[bufferHandle];
+    return getUnreadIndexCount(bufferHandle);
+}
 
-    if (rbInfo->readIndex > rbInfo->writeIndex)
+//----------------------------------------------------------------------------
+/**
+ * @brief Get the free space in the buffer.
+ * @param bufferHandle Handle of the buffer.
+ * @param freeSpace Pointer to store the free space in bytes.
+ * @return cBool Returns c_TRUE if the free space is retrieved successfully, otherwise c_FALSE
+ */
+cBool Rb_GetFreeSpace(cI32_t bufferHandle, cU64_t *freeSpace)
+{
+    if (IS_VALID_BUFFER_HANDLE(bufferHandle) == c_FALSE)
     {
-        return (MAX_DATA_INDEX - (rbInfo->readIndex - rbInfo->writeIndex));
+        EPRINT("invalid buffer handle: [bufferHandle=%d]", bufferHandle);
+        return c_FALSE;
     }
-    else
+
+    if (freeSpace == NULL)
     {
-        return (rbInfo->writeIndex - rbInfo->readIndex);
+        EPRINT("invalid free space pointer");
+        return c_FALSE;
     }
+
+    *freeSpace = getFreeSpace(bufferHandle);
+    return c_TRUE;
 }
 
 //----------------------------------------------------------------------------
@@ -188,7 +243,7 @@ cBool Rb_WriteToBuffer(cI32_t bufferHandle, const cU8_t *data, cU64_t dataBytes)
     cU64_t       contiguousFreeSpace = getContiguousFreeSpace(bufferHandle);
     const cU8_t *tDataPtr = data;
 
-    if (isFreeDataIndexAvailable(bufferHandle) == c_FALSE)
+    if (getUnreadIndexCount(bufferHandle) >= MAX_DATA_INDEX)
     {
         EPRINT("max data index reached");
         return c_FALSE;
@@ -257,9 +312,9 @@ cBool Rb_PeekRead(cI32_t bufferHandle, cU8_t **readPtr, cU64_t *dataBytes)
 
     if (rbInfo->dataLen[rbInfo->readIndex] == 0)
     {
-        DPRINT("no data available to read");
+        EPRINT("no data available to read");
         *dataBytes = 0;
-        return c_TRUE;
+        return c_FALSE;
     }
 
     // Check if reading fragmented data
@@ -316,6 +371,15 @@ cBool Rb_CommitRead(cI32_t bufferHandle, cU64_t dataBytes)
 
         rbInfo->fragmentedDataF = c_FALSE;
 
+        if (getFreeSpace(bufferHandle) == rbInfo->size)
+        {
+            // All data has been read, reset indices and pointers
+            rbInfo->readIndex = 0;
+            rbInfo->writeIndex = 0;
+            rbInfo->pReader = rbInfo->pBufferBegin;
+            rbInfo->pWriter = rbInfo->pBufferBegin;
+        }
+
         return c_TRUE;
     }
 
@@ -336,6 +400,15 @@ cBool Rb_CommitRead(cI32_t bufferHandle, cU64_t dataBytes)
     else
     {
         rbInfo->readIndex++;
+    }
+
+    if (getFreeSpace(bufferHandle) == rbInfo->size)
+    {
+        // All data has been read, reset indices and pointers
+        rbInfo->readIndex = 0;
+        rbInfo->writeIndex = 0;
+        rbInfo->pReader = rbInfo->pBufferBegin;
+        rbInfo->pWriter = rbInfo->pBufferBegin;
     }
 
     return c_TRUE;
@@ -417,11 +490,18 @@ static cBool handleFragmentedRead(Rb_Info_t *rbInfo, cU8_t **readPtr, cU64_t *da
  * @param bufferHandle Handle of the buffer.
  * @return cBool Returns c_TRUE if a free data index is available, otherwise c_FALSE
  */
-static cBool isFreeDataIndexAvailable(cI32_t bufferHandle)
+static cU64_t getUnreadIndexCount(cI32_t bufferHandle)
 {
     Rb_Info_t *rbInfo = &gRbInfo[bufferHandle];
 
-    return ((getOccupiedSpace(bufferHandle) > 0) && (rbInfo->readIndex == rbInfo->writeIndex));
+    if (rbInfo->readIndex > rbInfo->writeIndex)
+    {
+        return (MAX_DATA_INDEX - (rbInfo->readIndex - rbInfo->writeIndex));
+    }
+    else
+    {
+        return (rbInfo->writeIndex - rbInfo->readIndex);
+    }
 }
 
 //----------------------------------------------------------------------------

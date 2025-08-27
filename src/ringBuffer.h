@@ -12,7 +12,7 @@
  *****************************************************************************/
 #include "common_stddef.h"
 
-#define MAX_DATA_INDEX (1000000LL) /**< Maximum number of data indices in the ring buffer */
+#define MAX_DATA_INDEX (1000LL) /**< Maximum number of data indices in the ring buffer */
 /*****************************************************************************
  * STRUCTURES
  *****************************************************************************/
@@ -46,9 +46,11 @@ void Rb_DeinitModule(void);
 
 cBool Rb_CreateBuffer(cU64_t bufferSizeInBytes, cI32_t *bufferHandle);
 
-// TODO : Add destroy buffer API
+cBool Rb_DestroyBuffer(cI32_t *bufferHandle);
 
 cU64_t Rb_GetUnreadIndexCount(cI32_t bufferHandle);
+
+cBool Rb_GetFreeSpace(cI32_t bufferHandle, cU64_t *freeSpace);
 
 /** Zero copy read/write APIs */
 cBool Rb_WriteToBuffer(cI32_t bufferHandle, const cU8_t *data, cU64_t dataSize);
