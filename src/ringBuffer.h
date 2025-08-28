@@ -1,9 +1,7 @@
 /*****************************************************************************
  * @file    buffer.h
  * @author  Kshitij Mistry
- * @brief
- *
- *
+ * @brief   Header file for ring buffer implementation
  *****************************************************************************/
 #pragma once
 

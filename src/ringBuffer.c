@@ -1,9 +1,13 @@
 /*****************************************************************************
  * @file    ringBuffer.c
  * @author  Kshitij Mistry
- * @brief
- * @todo Add support for self allocated buffer memory, user will provide the memory pointer
- *       and size while creating the buffer instance.
+ * @brief   Implementation file for ring buffer APIs
+ * @todo    - Add support for self allocated buffer memory, user will provide the memory pointer
+ *          and size while creating the buffer instance.
+ *          - Add support for multiple readers/writers with proper synchronization.
+ *          - Add support for partial read within a data chunk.
+ *          - Make MAX_BUFFER_HANDLE and MAX_ALLOWED_BUFFER_SIZE_IN_BYTES configurable.
+ *          - Add apis to copy data from ring buffer to user provided buffer.
  *****************************************************************************/
 
 /*****************************************************************************
@@ -20,13 +24,13 @@
 #define _BYTES_PER_MEGA_BYTE             (1024LL*1024LL)
 
 /** Maximum allowed buffer size in bytes */
-#define MAX_ALLOWED_BUFFER_SIZE_IN_BYTES (10 * _BYTES_PER_MEGA_BYTE)  // 10 Mega Bytes (TODO : We can make this configurable)
+#define MAX_ALLOWED_BUFFER_SIZE_IN_BYTES (10 * _BYTES_PER_MEGA_BYTE)  // 10 Mega Bytes
 
 /** Invalid buffer handle */
-#define INVALID_BUFFER_HANDLE            (-1)  // Invalid buffer handle
+#define INVALID_BUFFER_HANDLE            (-1)
 
 /** Maximum number of buffer handles supported */
-#define MAX_BUFFER_HANDLE                (10)  // (TODO : We can make this configurable)
+#define MAX_BUFFER_HANDLE                (10)
 
 /** Check if buffer handle is valid */
 #define IS_VALID_BUFFER_HANDLE(handle) \
@@ -373,8 +377,6 @@ cBool Rb_PeekRead(cI32_t bufferHandle, cU8_t **readPtr, cU64_t *dataBytes)
  * @param bufferHandle Handle of the buffer.
  * @param dataBytes Size of the data read in bytes.
  * @return cBool Returns c_TRUE if the read is committed successfully, otherwise c_FALSE
- *
- * @todo Add partial read support within a data chunk
  */
 cBool Rb_CommitRead(cI32_t bufferHandle, cU64_t dataBytes)
 {
