@@ -218,6 +218,7 @@ cBool Rb_DestroyBuffer(cI32_t *bufferHandle)
         rbInfo->fragmentedDataPtr = NULL;
     }
 
+    rbInfo->bufferHandle = INVALID_BUFFER_HANDLE;
     *bufferHandle = INVALID_BUFFER_HANDLE;
 
     return c_TRUE;
@@ -443,42 +444,19 @@ static cBool handleFragmentedPeek(Rb_Info_t *rbInfo, cU8_t **readPtr, cU64_t *da
 {
     cU64_t part1Bytes, part2Bytes;
 
-    if (rbInfo->readIndex >= MAX_DATA_INDEX)
+    part1Bytes = rbInfo->dataLen[rbInfo->readIndex];
+    rbInfo->dataLen[rbInfo->readIndex] = 0;
+    rbInfo->readIndex++;
+
+    if (rbInfo->readIndex == MAX_DATA_INDEX)
     {
         // Wrap around
         rbInfo->readIndex = 0;
-
-        part1Bytes = rbInfo->dataLen[rbInfo->readIndex];
-        rbInfo->dataLen[rbInfo->readIndex] = 0;
-        rbInfo->readIndex++;
-
-        part2Bytes = rbInfo->dataLen[rbInfo->readIndex];
-        rbInfo->dataLen[rbInfo->readIndex] = 0;
-        rbInfo->readIndex++;
     }
-    else if ((rbInfo->readIndex + 1) >= MAX_DATA_INDEX)
-    {
-        part1Bytes = rbInfo->dataLen[rbInfo->readIndex];
-        rbInfo->dataLen[rbInfo->readIndex] = 0;
 
-        // Wrap around
-        rbInfo->readIndex = 0;
-
-        part2Bytes = rbInfo->dataLen[rbInfo->readIndex];
-        rbInfo->dataLen[rbInfo->readIndex] = 0;
-        rbInfo->readIndex++;
-    }
-    else
-    {
-        // Normal case
-        part1Bytes = rbInfo->dataLen[rbInfo->readIndex];
-        rbInfo->dataLen[rbInfo->readIndex] = 0;
-        rbInfo->readIndex++;
-
-        part2Bytes = rbInfo->dataLen[rbInfo->readIndex];
-        rbInfo->dataLen[rbInfo->readIndex] = 0;
-        rbInfo->readIndex++;
-    }
+    part2Bytes = rbInfo->dataLen[rbInfo->readIndex];
+    rbInfo->dataLen[rbInfo->readIndex] = 0;
+    rbInfo->readIndex++;
 
     // Allocate memory to hold the fragmented data
     rbInfo->fragmentedDataPtr = (cU8_t *)malloc(part1Bytes + part2Bytes);
@@ -522,14 +500,11 @@ static void advanceReader(Rb_Info_t *rbInfo, cU64_t dataBytes)
 {
     rbInfo->dataLen[rbInfo->readIndex] = 0;
     rbInfo->pReader += dataBytes;
+    rbInfo->readIndex++;
 
-    if (rbInfo->readIndex == (MAX_DATA_INDEX - 1))
+    if (rbInfo->readIndex == MAX_DATA_INDEX)
     {
         rbInfo->readIndex = 0;
-    }
-    else
-    {
-        rbInfo->readIndex++;
     }
 }
 
@@ -614,7 +589,6 @@ static cU64_t getOccupiedSpace(cI32_t bufferHandle)
 
     return (rbInfo->size - getFreeSpace(bufferHandle));
 }
-
 
 /*****************************************************************************
  * @END OF FILE
