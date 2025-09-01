@@ -305,6 +305,12 @@ cBool Rb_WriteToBuffer(cI32_t bufferHandle, const cU8_t *data, cU64_t dataBytes)
         rbInfo->dataLen[rbInfo->writeIndex] = contiguousFreeSpace;
         rbInfo->writeIndex++;
 
+        if (rbInfo->writeIndex == MAX_DATA_INDEX)
+        {
+            // Wrap around
+            rbInfo->writeIndex = 0;
+        }
+
         // Update pointer and size to write remaining data
         tDataPtr += contiguousFreeSpace;
         dataBytes -= contiguousFreeSpace;
@@ -318,6 +324,12 @@ cBool Rb_WriteToBuffer(cI32_t bufferHandle, const cU8_t *data, cU64_t dataBytes)
     rbInfo->dataLen[rbInfo->writeIndex] = dataBytes;
     rbInfo->writeIndex++;
     rbInfo->pWriter += dataBytes;
+
+    if (rbInfo->writeIndex == MAX_DATA_INDEX)
+    {
+        // Wrap around
+        rbInfo->writeIndex = 0;
+    }
 
     return c_TRUE;
 }
